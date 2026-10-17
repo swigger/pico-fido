@@ -16,6 +16,7 @@
  */
 
 #include "pico_keys.h"
+#include "remote_presence.h"
 #include "cbor_make_credential.h"
 #include "ctap2_cbor.h"
 #include "hid/ctap_hid.h"
@@ -205,6 +206,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     uint8_t flags = FIDO2_AUT_FLAG_AT;
     uint8_t rp_id_hash[32] = {0};
     mbedtls_sha256((uint8_t *) rp.id.data, rp.id.len, rp_id_hash, 0);
+    if (clientDataHash.len == 32) {
+        remote_presence_context(1, rp_id_hash, clientDataHash.data, rp.id.data, rp.id.len);
+    }
 
     if (pinUvAuthParam.present == true) {
         if (pinUvAuthParam.len == 0 || pinUvAuthParam.data == NULL) {
@@ -393,11 +397,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     }
 
     if (options.up == ptrue || options.up == NULL) { //14.1
-        if (pinUvAuthParam.present == true) {
-            if (getUserPresentFlagValue() == false) {
-                if (check_user_presence() == false) {
-                    CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
-                }
+        if (!pinUvAuthParam.present || !getUserPresentFlagValue()) {
+            if (check_user_presence() == false) {
+                CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
             }
         }
         flags |= FIDO2_AUT_FLAG_UP;
@@ -592,25 +594,37 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         md = NULL;
     }
 #endif
-    if (md != NULL) {
-        ret = mbedtls_md(md, aut_data, aut_data_len + clientDataHash.len, hash);
-    }
-
     bool self_attestation = true;
-    if (enterpriseAttestation == 2 || (ka && ka->use_self_attestation == pfalse)) {
+    if (enterpriseAttestation == 2 || is_nk || (ka && ka->use_self_attestation == pfalse)) {
         mbedtls_ecp_keypair_free(&ekey);
         mbedtls_ecp_keypair_init(&ekey);
         uint8_t key[32] = {0};
         if (load_keydev(key) != 0) {
+            mbedtls_platform_zeroize(key, sizeof(key));
+            mbedtls_ecp_keypair_free(&ekey);
             CBOR_ERROR(CTAP1_ERR_OTHER);
         }
         ret = mbedtls_ecp_read_key(MBEDTLS_ECP_DP_SECP256R1, &ekey, key, 32);
         mbedtls_platform_zeroize(key, sizeof(key));
+        if (ret != 0) {
+            mbedtls_ecp_keypair_free(&ekey);
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
+        ret = fido_upgrade_device_certificate(&ekey);
+        if (ret != 0) {
+            mbedtls_ecp_keypair_free(&ekey);
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
+        }
         md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
         self_attestation = false;
     }
     if (md != NULL) {
-        ret = mbedtls_ecdsa_write_signature(&ekey, mbedtls_md_get_type(md), hash, mbedtls_md_get_size(md), sig, sizeof(sig), &olen, random_gen, NULL);
+        // Hash with the attestation key's algorithm, not the credential curve.
+        // Device attestation uses ES256 even for ES384/ES512 credentials.
+        ret = mbedtls_md(md, aut_data, aut_data_len + clientDataHash.len, hash);
+        if (ret == 0) {
+            ret = mbedtls_ecdsa_write_signature(&ekey, mbedtls_md_get_type(md), hash, mbedtls_md_get_size(md), sig, sizeof(sig), &olen, random_gen, NULL);
+        }
     }
 #ifdef MBEDTLS_EDDSA_C
     else {
@@ -646,12 +660,12 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     CBOR_CHECK(cbor_encode_byte_string(&mapEncoder, aut_data, aut_data_len));
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x03));
 
-    CBOR_CHECK(cbor_encoder_create_map(&mapEncoder, &mapEncoder2, self_attestation == false || is_nk ? 3 : 2));
+    CBOR_CHECK(cbor_encoder_create_map(&mapEncoder, &mapEncoder2, self_attestation ? 2 : 3));
     CBOR_CHECK(cbor_encode_text_stringz(&mapEncoder2, "alg"));
-    CBOR_CHECK(cbor_encode_negative_int(&mapEncoder2, self_attestation || is_nk ? -alg : -FIDO2_ALG_ES256));
+    CBOR_CHECK(cbor_encode_negative_int(&mapEncoder2, self_attestation ? -alg : -FIDO2_ALG_ES256));
     CBOR_CHECK(cbor_encode_text_stringz(&mapEncoder2, "sig"));
     CBOR_CHECK(cbor_encode_byte_string(&mapEncoder2, sig, olen));
-    if (self_attestation == false || is_nk) {
+    if (!self_attestation) {
         CborEncoder arrEncoder;
         file_t *ef_cert = NULL;
         if (enterpriseAttestation == 2) {
@@ -659,6 +673,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         }
         if (!file_has_data(ef_cert)) {
             ef_cert = ef_certdev;
+        }
+        if (!file_has_data(ef_cert)) {
+            CBOR_ERROR(CTAP2_ERR_PROCESSING);
         }
         CBOR_CHECK(cbor_encode_text_stringz(&mapEncoder2, "x5c"));
         CBOR_CHECK(cbor_encoder_create_array(&mapEncoder2, &arrEncoder, 1));

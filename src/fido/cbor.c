@@ -16,6 +16,7 @@
  */
 
 #include "pico_keys.h"
+#include "remote_presence.h"
 #if defined(PICO_PLATFORM)
 #include "pico/stdlib.h"
 #endif
@@ -52,6 +53,13 @@ size_t cbor_len = 0;
 uint8_t cbor_cmd = 0;
 
 int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
+    // Route before any local PIN, credential, reset, vendor or GetInfo handler.
+    if (!remote_device_local_allowed()) {
+        uint16_t response_length = 0;
+        int result = remote_device_cbor(cmd, data, len, res_APDU, CTAP_MAX_CBOR_PAYLOAD, &response_length);
+        res_APDU_size = response_length;
+        return result;
+    }
     if (len == 0 && cmd == CTAPHID_CBOR) {
         return CTAP1_ERR_INVALID_LEN;
     }
@@ -108,6 +116,8 @@ int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
     return CTAP1_ERR_INVALID_CMD;
 }
 
+extern bool cancel_button;
+
 void *cbor_thread(void *arg) {
     (void)arg;
     card_init_core1();
@@ -121,6 +131,10 @@ void *cbor_thread(void *arg) {
             break;
         }
         apdu.sw = (uint16_t)cbor_parse(cbor_cmd, cbor_data, cbor_len);
+        remote_presence_clear();
+        if (cancel_button && apdu.sw == CTAP2_ERR_OPERATION_DENIED) {
+            apdu.sw = CTAP2_ERR_KEEPALIVE_CANCEL;
+        }
         if (apdu.sw == 0) {
             DEBUG_DATA(res_APDU, res_APDU_size);
         }
@@ -143,6 +157,8 @@ void *cbor_thread(void *arg) {
 }
 
 int cbor_process(uint8_t last_cmd, const uint8_t *data, size_t len) {
+    remote_presence_clear();
+    cancel_button = false;
     cbor_data = data;
     cbor_len = len;
     cbor_cmd = last_cmd;
