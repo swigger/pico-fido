@@ -16,6 +16,7 @@
  */
 
 #include "pico_keys.h"
+#include "remote_presence.h"
 #include "cbor_make_credential.h"
 #include "ctap2_cbor.h"
 #include "hid/ctap_hid.h"
@@ -196,6 +197,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     uint8_t flags = FIDO2_AUT_FLAG_AT;
     uint8_t rp_id_hash[32] = {0};
     mbedtls_sha256((uint8_t *) rp.id.data, rp.id.len, rp_id_hash, 0);
+    if (clientDataHash.len == 32) {
+        remote_presence_context(1, rp_id_hash, clientDataHash.data, rp.id.data, rp.id.len);
+    }
 
     if (pinUvAuthParam.present == true) {
         if (pinUvAuthParam.len == 0 || pinUvAuthParam.data == NULL) {
@@ -384,11 +388,9 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
     }
 
     if (options.up == ptrue || options.up == NULL) { //14.1
-        if (pinUvAuthParam.present == true) {
-            if (getUserPresentFlagValue() == false) {
-                if (check_user_presence() == false) {
-                    CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
-                }
+        if (!pinUvAuthParam.present || !getUserPresentFlagValue()) {
+            if (check_user_presence() == false) {
+                CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
             }
         }
         flags |= FIDO2_AUT_FLAG_UP;

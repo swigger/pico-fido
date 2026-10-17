@@ -16,6 +16,7 @@
  */
 
 #include "pico_keys.h"
+#include "remote_presence.h"
 #include "cbor.h"
 #include "ctap.h"
 #if defined(PICO_PLATFORM)
@@ -209,6 +210,9 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
     uint8_t flags = 0;
     uint8_t rp_id_hash[32] = {0};
     mbedtls_sha256((uint8_t *) rpId.data, rpId.len, rp_id_hash, 0);
+    if (clientDataHash.len == 32) {
+        remote_presence_context(2, rp_id_hash, clientDataHash.data, rpId.data, rpId.len);
+    }
 
     bool resident = false;
     uint8_t numberOfCredentials = 0;
