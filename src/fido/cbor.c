@@ -53,6 +53,13 @@ size_t cbor_len = 0;
 uint8_t cbor_cmd = 0;
 
 int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
+    // Route before any local PIN, credential, reset, vendor or GetInfo handler.
+    if (!remote_device_local_allowed()) {
+        uint16_t response_length = 0;
+        int result = remote_device_cbor(cmd, data, len, res_APDU, CTAP_MAX_CBOR_PAYLOAD, &response_length);
+        res_APDU_size = response_length;
+        return result;
+    }
     if (len == 0 && cmd == CTAPHID_CBOR) {
         return CTAP1_ERR_INVALID_LEN;
     }
