@@ -25,6 +25,7 @@
 #include "random.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/hkdf.h"
+#include "mbedtls/sha256.h"
 #if defined(USB_ITF_CCID)
 #include "ccid/ccid.h"
 #endif
